@@ -271,14 +271,90 @@ def test_BIM_attack(model, device, val_loader, epsilon, alpha, epochs):
 
     return final_acc, adv_examples
 
+def iterative_least_likey_class_attack(X, alpha, epsilon, epochs, loss_fn, y_target, model):
+    perturbed_image = X
+    
+    for epoch in range(epochs):
+        perturbed_image.retain_grad()
+        output = model(perturbed_image)
+        loss = loss_fn(output, y_target)
+        
+        loss.backward(retain_graph=True)
+        # print(type(perturbed_image))
+        data_grad = perturbed_image.grad.data
+        signed_data_grad = data_grad.sign()
+        perturbed_image = perturbed_image - alpha*signed_data_grad
+        perturbed_image = Clip(perturbed_image, X, epsilon)
+
+    return perturbed_image
+
+def test_illca_attack(model, device, val_loader, epsilon, alpha, epochs):
+    correct = 0
+    adv_examples = []
+    targets = []
+
+    for data, target in tqdm(val_loader):
+        data, target = data.to(device), target.to(device)
+        data.requires_grad = True
+        output = model(data)
+        init_pred = torch.argmax(F.softmax(output, dim=1),dim=1)
+
+        if init_pred.item() != target.item():
+            continue
+
+        target_class = torch.argmin(F.softmax(output, dim=1), dim=1)
+
+        data_denorm = denorm(data)
+
+        loss = F.nll_loss
+
+        perturbed_data = iterative_least_likey_class_attack(data_denorm,  alpha, epsilon, epochs, loss, target_class,model)
+
+        perturbed_data_normalized = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(perturbed_data)
+
+        output = model(perturbed_data_normalized)
+
+        final_pred = torch.argmax(F.softmax(output, dim=1),dim=1)
+
+        if final_pred.item() == target.item():
+            correct += 1
+
+        if epsilon == 0 and len(adv_examples) < 3:
+            perturbed_data = perturbed_data.permute(0,2,3,1)
+            adv_ex = perturbed_data.squeeze().detach().cpu().numpy()
+            data1 = data
+            data1 = torch.clamp(data_denorm,0,1)
+            # data1 = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(data1)
+            data1 = data1.permute(0,2,3,1)
+            orig = data1.squeeze().detach().cpu().numpy()
+            adv_examples.append((init_pred.item(), final_pred.item(), adv_ex,orig))
+            targets.append((target.item(), target_class.item(), final_pred.item()))
+        else:
+            if len(adv_examples) < 3 and final_pred.item() != target.item() and final_pred.item() == target_class.item():
+                perturbed_data = perturbed_data.permute(0,2,3,1)
+                data1 = data
+                data1 = torch.clamp(data_denorm,0,1)
+                # data1 = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(data1)
+                data1 = data1.permute(0,2,3,1)
+                orig = data1.squeeze().detach().cpu().numpy()
+                adv_ex = perturbed_data.squeeze().detach().cpu().numpy()
+                adv_examples.append((init_pred.item(), final_pred.item(), adv_ex,orig))
+                targets.append((target.item(), target_class.item(), final_pred.item()))
+
+    final_acc = correct/float(len(val_loader))
+    print(f"Epsilon: {epsilon}\tTest Accuracy = {correct} / {len(val_loader)} = {final_acc}")
+
+    return final_acc, adv_examples, targets
+
+
 def plot_BIM():
-    epsilons = [0,0.001,0.002,0.003,0.004,0.005,0.1,0.15,0.2]
+    epsilons = [0.1,0.15,0.2,0.25,0.30]
     # epsilons = [0.0]
     accs = []
     examples = []
     for eps in epsilons:
         print(f"Epsilon : {eps}")
-        acc,ex = test_BIM_attack(model, device, val_loader, eps, 1, 10)
+        acc,ex = test_BIM_attack(model, device, val_loader, eps, 1, 20)
         print(f"For epsilon : {eps}, accuracy : {acc}")
         accs.append(acc)
         examples.append(ex)
@@ -291,6 +367,21 @@ def plot_BIM():
     plt.show()
     return examples, epsilons
 
-examples, epsilons = plot_fgsm()
+def plot_illca():
+    epsilons = [0.1,0.15,0.2]
+    accs = []
+    examples = []
+    for eps in epsilons:
+        print(f"Epsilon : {eps}")
+        acc,ex,targets = test_illca_attack(model, device, val_loader, eps, 1, 20)
+        print(f"For epsilon : {eps}, accuracy : {acc}")
+        accs.append(acc)
+        examples.append(ex)
 
-plot_adverseries(examples,epsilons)
+        print(f"For epsilon : {eps}, Accuracy : {acc}")
+        for el in targets:
+            print(f"Original image : {el[0]}, least likely : {el[1]}, adversary : {el[2]}")
+
+# examples, epsilons = plot_fgsm()
+plot_illca()
+# plot_adverseries(examples,epsilons)
